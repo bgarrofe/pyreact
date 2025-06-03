@@ -511,12 +511,58 @@ class PyReactTranspiler:
         """
         render_body = render_method_info['body']
         
-        # Find the return statement
+        # Track local variables for proper transpilation
+        self.local_variables = {}
+        
+        # Process all statements to handle local variables
+        js_statements = []
+        return_statement = None
+        
         for stmt in render_body:
             if isinstance(stmt, ast.Return):
-                return self._transpile_element_expression(stmt.value)
+                return_statement = stmt
+            elif isinstance(stmt, ast.Assign):
+                # Handle local variable assignments
+                js_assign = self._transpile_render_assignment(stmt)
+                if js_assign:
+                    js_statements.append(js_assign)
+        
+        # Generate the return statement
+        if return_statement:
+            if js_statements:
+                # If we have local variables, wrap in an IIFE
+                statements_str = '; '.join(js_statements)
+                return_expr = self._transpile_element_expression(return_statement.value)
+                return f"(() => {{ {statements_str}; return {return_expr}; }})()"
+            else:
+                return self._transpile_element_expression(return_statement.value)
         
         return "null"
+    
+    def _transpile_render_assignment(self, assign_node):
+        """
+        Transpile assignment statements in render method to track local variables.
+        
+        Args:
+            assign_node: AST Assign node
+            
+        Returns:
+            str: JavaScript assignment or None
+        """
+        if len(assign_node.targets) == 1:
+            target = assign_node.targets[0]
+            if isinstance(target, ast.Name):
+                var_name = target.id
+                
+                # Transpile the assignment value
+                value_js = self._transpile_expression(assign_node.value)
+                
+                # Track this local variable
+                self.local_variables[var_name] = value_js
+                
+                return f"const {var_name} = {value_js}"
+        
+        return None
     
     def _transpile_statement(self, stmt):
         """
@@ -600,6 +646,8 @@ class PyReactTranspiler:
             return self._transpile_f_string(expr)
         elif isinstance(expr, ast.Call):
             return self._transpile_function_call(expr)
+        elif isinstance(expr, ast.Subscript):
+            return self._transpile_subscript(expr)
         else:
             return "null"
     
@@ -794,11 +842,21 @@ class PyReactTranspiler:
             if isinstance(value, ast.Constant):
                 parts.append(value.value)
             elif isinstance(value, ast.FormattedValue):
-                expr_js = self._transpile_expression(value.value)
-                # Handle subscript access for state
-                if isinstance(value.value, ast.Subscript):
-                    expr_js = self._transpile_subscript(value.value)
-                parts.append(f"${{{expr_js}}}")
+                # Check if this is a simple variable name that might be local
+                if isinstance(value.value, ast.Name):
+                    var_name = value.value.id
+                    # Check if it's a tracked local variable
+                    if hasattr(self, 'local_variables') and var_name in self.local_variables:
+                        parts.append(f"${{{var_name}}}")
+                    else:
+                        expr_js = self._transpile_expression(value.value)
+                        parts.append(f"${{{expr_js}}}")
+                else:
+                    expr_js = self._transpile_expression(value.value)
+                    # Handle subscript access for state
+                    if isinstance(value.value, ast.Subscript):
+                        expr_js = self._transpile_subscript(value.value)
+                    parts.append(f"${{{expr_js}}}")
         
         return "`" + "".join(parts) + "`"
     
@@ -837,6 +895,24 @@ class PyReactTranspiler:
             func_name = call_node.func.id
             args = [self._transpile_expression(arg) for arg in call_node.args]
             return f"{func_name}({', '.join(args)})"
+        elif isinstance(call_node.func, ast.Attribute):
+            # Handle method calls like self.props.get()
+            obj_js = self._transpile_expression(call_node.func.value)
+            method_name = call_node.func.attr
+            args = [self._transpile_expression(arg) for arg in call_node.args]
+            
+            # Special handling for self.props.get() - use logical OR for fallback
+            if (isinstance(call_node.func.value, ast.Attribute) and
+                isinstance(call_node.func.value.value, ast.Name) and
+                call_node.func.value.value.id == 'self' and
+                call_node.func.value.attr == 'props' and
+                method_name == 'get' and len(args) == 2):
+                # Convert self.props.get('key', default) to (props.key || default)
+                key_arg = args[0].strip('"\'')  # Remove quotes from string literal
+                default_arg = args[1]
+                return f"(props.{key_arg} || {default_arg})"
+            
+            return f"{obj_js}.{method_name}({', '.join(args)})"
         
         return "null"
     

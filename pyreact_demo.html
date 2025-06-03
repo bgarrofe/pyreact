@@ -87,7 +87,7 @@ function Greeting(props) {
     setState(prevState => ({...prevState, ...{"name": "PyReact User"}}));
   };
 
-  return React.createElement('div', null, [React.createElement('h2', null, [`Hello, ${name}!`]), React.createElement('p', null, ["This is a greeting component built with PyReact."]), React.createElement('button', {onClick: update_name}, ["Change Name"])]);
+  return (() => { const name = (props.name || state.name); return React.createElement('div', null, [React.createElement('h2', null, [`Hello, ${name}!`]), React.createElement('p', null, ["This is a greeting component built with PyReact."]), React.createElement('button', {onClick: update_name}, ["Change Name"])]); })();
 }
 
 function ClickTracker(props) {
